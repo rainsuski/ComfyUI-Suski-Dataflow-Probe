@@ -59,6 +59,7 @@ desktop.ini
 .coverage
 htmlcov/
 .mypy_cache/
+test/
 
 # Local logs & Mock workflows
 *.log
