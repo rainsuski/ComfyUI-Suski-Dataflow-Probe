@@ -1,4 +1,4 @@
-# ComfyUI-DataflowProbe
+# ComfyUI-Suski-Dataflow-Probe
 
 **通用数据流血统探针与动态元数据注入系统**
 *Universal Dataflow Lineage Probe & Dynamic Metadata Injection System for ComfyUI*
