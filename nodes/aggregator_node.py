@@ -20,7 +20,7 @@ META_INPUT_TYPE = AnyType("STAGE_META")
 class MetaAggregatorInjectorNode:
     """
     通用元数据聚合注入节点：
-    单一输入端口接收多阶段时序账单，注入 extra_pnginfo 文本块，并输出纯净 JSON 字符串。
+    单一输入端口接收多阶段时序账单，封装主键并注入 extra_pnginfo 文本块，同时输出纯净 JSON 字符串。
     """
 
     @classmethod
@@ -31,6 +31,14 @@ class MetaAggregatorInjectorNode:
             },
             "optional": {
                 "stage_meta": (META_INPUT_TYPE, {}),
+                "png_metadata_key": (
+                    "STRING",
+                    {
+                        "default": "dataflow_lineage",
+                        "multiline": False,
+                        "placeholder": "写入 PNG tEXt 块的主键名，默认 dataflow_lineage",
+                    },
+                ),
                 "custom_metadata": (
                     "STRING",
                     {
@@ -82,6 +90,7 @@ class MetaAggregatorInjectorNode:
         self,
         flow: Any,
         stage_meta: Any = None,
+        png_metadata_key: str = "dataflow_lineage",
         custom_metadata: str = "",
         extra_pnginfo: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, str]:
@@ -99,7 +108,7 @@ class MetaAggregatorInjectorNode:
             except Exception:
                 custom_dict = parse_key_value_pairs(raw_text)
 
-        # 3. 组装标准 Payload
+        # 3. 组装标准 Payload (带根级主键与 Schema)
         payload: Dict[str, Any] = {
             "schema_version": "3.0",
             "stage_count": len(stages),
@@ -107,11 +116,12 @@ class MetaAggregatorInjectorNode:
             "custom": sanitize_for_json(custom_dict),
         }
 
-        # 4. 隐式注入 extra_pnginfo (供 SaveImage 原生持久化)
+        # 4. 隐式注入 extra_pnginfo (指定主键，供 SaveImage 原生持久化)
+        target_key = png_metadata_key.strip() or "dataflow_lineage"
         if extra_pnginfo is not None and isinstance(extra_pnginfo, dict):
-            extra_pnginfo["dataflow_lineage"] = payload
+            extra_pnginfo[target_key] = payload
 
-        # 5. 输出格式化 JSON 字符串
+        # 5. 输出格式化 JSON 字符串 (供外部文件存储或 API 使用)
         json_output = safe_json_dumps(payload, indent=2)
 
         return flow, json_output
