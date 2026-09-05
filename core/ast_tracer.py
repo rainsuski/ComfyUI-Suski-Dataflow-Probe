@@ -76,7 +76,7 @@ class DataflowASTTracer:
             depth=0,
         )
 
-        # 正向与负向提示词去重自然拼接
+        # 1. 正向与负向提示词去重自然拼接
         for prompt_key in ["positive_prompt", "negative_prompt"]:
             if prompt_key in collected_values and len(collected_values[prompt_key]) > 1:
                 raw_segments = [
@@ -91,6 +91,18 @@ class DataflowASTTracer:
                 if unique_segments:
                     collected_values[prompt_key] = [", ".join(unique_segments)]
 
+        # 2. LoRA 列表保序去重（保留最靠近采样的生效权重）
+        if "loras" in collected_values and collected_values["loras"]:
+            dedup_loras: List[Dict[str, Any]] = []
+            seen_names: Set[str] = set()
+            for lora_item in collected_values["loras"]:
+                if isinstance(lora_item, dict):
+                    name = lora_item.get("lora_name")
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        dedup_loras.append(lora_item)
+            collected_values["loras"] = dedup_loras
+
         final_res = ConflictResolver.resolve(
             collected_values=collected_values,
             strategy=self.conflict_strategy,
@@ -104,8 +116,15 @@ class DataflowASTTracer:
 
     def _clean_lora_payload(self, raw_val: Any) -> Optional[List[Dict[str, Any]]]:
         """
-        清洗各第三方 LoRA 节点的非标列表载荷。
+        清洗各第三方 LoRA 节点的非标载荷（支持 list 或单个 dict）。
         """
+        if isinstance(raw_val, dict):
+            name = raw_val.get("name") or raw_val.get("lora_name")
+            strength = raw_val.get("strength", 1.0)
+            if name:
+                return [{"lora_name": str(name), "strength": float(strength)}]
+            return None
+
         if not isinstance(raw_val, list):
             return None
 
@@ -115,7 +134,9 @@ class DataflowASTTracer:
                 name = item.get("name") or item.get("lora_name")
                 strength = item.get("strength", 1.0)
                 if name:
-                    clean_loras.append({"lora_name": name, "strength": strength})
+                    clean_loras.append(
+                        {"lora_name": str(name), "strength": float(strength)}
+                    )
             elif isinstance(item, (list, tuple)) and len(item) >= 2:
                 clean_loras.append(
                     {"lora_name": str(item[0]), "strength": float(item[1])}
@@ -141,6 +162,19 @@ class DataflowASTTracer:
         class_type_lower = class_type.lower()
         inputs: Dict[str, Any] = node_info.get("inputs", {})
 
+        # 特殊处理：如果是原生单 LoRA 加载节点 (如 LoraLoader, LoraLoaderModelOnly)
+        if "loraloader" in class_type_lower:
+            lora_name = inputs.get("lora_name")
+            if isinstance(lora_name, str) and lora_name.strip():
+                strength = inputs.get("strength_model", 1.0)
+                try:
+                    strength = float(strength)
+                except Exception:
+                    strength = 1.0
+                collected["loras"].append(
+                    {"lora_name": lora_name.strip(), "strength": strength}
+                )
+
         for input_key, input_val in inputs.items():
             clean_input_key = input_key.strip().lower()
 
@@ -163,10 +197,28 @@ class DataflowASTTracer:
             elif clean_input_key in {"model", "unet"}:
                 branch_is_model = True
 
-            # 2. 如果输入是连线指针 [upstream_id, slot_idx]
+            # 2. 严格判定是否为合法连线指针 [upstream_node_id, slot_index]
+            is_valid_link = False
+            upstream_id = ""
+            slot_idx = -1
+
             if isinstance(input_val, (list, tuple)) and len(input_val) == 2:
-                upstream_id = str(input_val[0])
-                slot_idx = int(input_val[1])
+                candidate_id = str(input_val[0])
+                candidate_slot = input_val[1]
+
+                if candidate_id in self.prompt:
+                    if isinstance(candidate_slot, int) and not isinstance(
+                        candidate_slot, bool
+                    ):
+                        is_valid_link = True
+                        upstream_id = candidate_id
+                        slot_idx = candidate_slot
+                    elif isinstance(candidate_slot, str) and candidate_slot.isdigit():
+                        is_valid_link = True
+                        upstream_id = candidate_id
+                        slot_idx = int(candidate_slot)
+
+            if is_valid_link:
                 is_boundary = self.scope_manager.is_boundary_connection(clean_input_key)
                 pass_scope = None if is_boundary else next_scope
 
@@ -210,7 +262,7 @@ class DataflowASTTracer:
                     depth=depth + 1,
                 )
 
-            # 3. 如果是字面量 (int, float, str, bool)
+            # 3. 如果是普通字面量 (int, float, str, bool)
             elif isinstance(input_val, (int, float, str, bool)):
                 if (
                     class_type_lower in self.PRIMITIVE_CLASS_TYPES
@@ -244,12 +296,8 @@ class DataflowASTTracer:
                 elif self._is_target_key(actual_key):
                     collected[actual_key].append(input_val)
 
-            # 4. 针对 LoRA 列表槽位 (loras, lora_stack) 的特殊解析
-            elif isinstance(input_val, list) and clean_input_key in {
-                "loras",
-                "lora_stack",
-                "lora",
-            }:
+            # 4. 如果是 LoRA 列表或字典载荷 (loras, lora_stack, lora)
+            elif clean_input_key in {"loras", "lora_stack", "lora"}:
                 parsed_loras = self._clean_lora_payload(input_val)
                 if parsed_loras and (
                     self._is_target_key("loras") or self._is_target_key("lora_name")
