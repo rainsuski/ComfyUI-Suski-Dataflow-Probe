@@ -76,7 +76,7 @@ class DataflowASTTracer:
             depth=0,
         )
 
-        # 正向与负向提示词去重拼接
+        # 正向与负向提示词去重自然拼接
         for prompt_key in ["positive_prompt", "negative_prompt"]:
             if prompt_key in collected_values and len(collected_values[prompt_key]) > 1:
                 raw_segments = [
@@ -91,11 +91,16 @@ class DataflowASTTracer:
                 if unique_segments:
                     collected_values[prompt_key] = [", ".join(unique_segments)]
 
-        return ConflictResolver.resolve(
+        final_res = ConflictResolver.resolve(
             collected_values=collected_values,
             strategy=self.conflict_strategy,
             strategy_index=self.strategy_index,
         )
+
+        logger.debug(
+            f"[DataflowProbe] 回溯完成: 节点 [{start_node_id}] 提取到 {len(final_res)} 个有效参数"
+        )
+        return final_res
 
     def _clean_lora_payload(self, raw_val: Any) -> Optional[List[Dict[str, Any]]]:
         """
@@ -107,13 +112,11 @@ class DataflowASTTracer:
         clean_loras: List[Dict[str, Any]] = []
         for item in raw_val:
             if isinstance(item, dict):
-                # 兼容 LoraManager: {'name': '...', 'strength': 1.0}
                 name = item.get("name") or item.get("lora_name")
                 strength = item.get("strength", 1.0)
                 if name:
                     clean_loras.append({"lora_name": name, "strength": strength})
             elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                # 兼容 LoraStack: [('lora_name', strength_model, strength_clip), ...]
                 clean_loras.append(
                     {"lora_name": str(item[0]), "strength": float(item[1])}
                 )
@@ -168,7 +171,7 @@ class DataflowASTTracer:
                 pass_scope = None if is_boundary else next_scope
 
                 # 穿透读取动态输出
-                hit, runtime_val, _ = RuntimeCacheAccessor.resolve_dynamic_output(
+                hit, runtime_val = RuntimeCacheAccessor.resolve_dynamic_output(
                     upstream_node_id=upstream_id,
                     slot_index=slot_idx,
                     mock_cache=self.mock_cache,
