@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-suski-dataflow-probe"
-version = "1.0.0"
+version = "0.1.0"
 description = "Universal Dataflow Lineage Probe & Dynamic Metadata Injection System for ComfyUI"
 readme = "README.md"
 requires-python = ">=3.9"
