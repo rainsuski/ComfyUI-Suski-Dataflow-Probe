@@ -1,4 +1,4 @@
-# ComfyUI-DataflowProbe
+# ComfyUI-Suski-Dataflow-Probe
 
 **通用数据流血统探针与动态元数据注入系统**
 *Universal Dataflow Lineage Probe & Dynamic Metadata Injection System for ComfyUI*
@@ -137,7 +137,7 @@
 
 ```bash
 cd custom_nodes
-git clone https://github.com/your-username/ComfyUI-DataflowProbe.git
+git clone https://github.com/rainsuski/ComfyUI-Suski-Dataflow-Probe.git
 ```
 
 本插件采用纯标准库与轻量架构实现，零第三方重量级依赖。
