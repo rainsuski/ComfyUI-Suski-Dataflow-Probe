@@ -6,6 +6,7 @@ DAG 拓扑反向血统追踪核心引擎。
 from __future__ import annotations
 
 import logging
+import sys
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Union
 
@@ -91,7 +92,7 @@ class DataflowASTTracer:
                 if unique_segments:
                     collected_values[prompt_key] = [", ".join(unique_segments)]
 
-        # 2. LoRA 列表保序去重（保留最靠近采样的生效权重）
+        # 2. LoRA 列表保序去重
         if "loras" in collected_values and collected_values["loras"]:
             dedup_loras: List[Dict[str, Any]] = []
             seen_names: Set[str] = set()
@@ -114,10 +115,15 @@ class DataflowASTTracer:
         )
         return final_res
 
+    def _resolve_node_class(self, class_type: str) -> Optional[type]:
+        """动态获取当前运行时环境注册的节点类对象。"""
+        nodes_mod = sys.modules.get("nodes")
+        if nodes_mod and hasattr(nodes_mod, "NODE_CLASS_MAPPINGS"):
+            return nodes_mod.NODE_CLASS_MAPPINGS.get(class_type)
+        return None
+
     def _clean_lora_payload(self, raw_val: Any) -> Optional[List[Dict[str, Any]]]:
-        """
-        清洗各第三方 LoRA 节点的非标载荷（支持 list 或单个 dict）。
-        """
+        """清洗各第三方 LoRA 节点的非标载荷。"""
         if isinstance(raw_val, dict):
             name = raw_val.get("name") or raw_val.get("lora_name")
             strength = raw_val.get("strength", 1.0)
@@ -162,7 +168,42 @@ class DataflowASTTracer:
         class_type_lower = class_type.lower()
         inputs: Dict[str, Any] = node_info.get("inputs", {})
 
-        # 特殊处理：如果是原生单 LoRA 加载节点 (如 LoraLoader, LoraLoaderModelOnly)
+        # 1. 协议自省判定：若上游节点实现了 get_probe_metadata 契约，则委托自省并阻断向上递归
+        node_cls = self._resolve_node_class(class_type)
+        if node_cls and hasattr(node_cls, "get_probe_metadata"):
+            hit, runtime_val = RuntimeCacheAccessor.resolve_dynamic_output(
+                upstream_node_id=node_id,
+                slot_index=0,
+                mock_cache=self.mock_cache,
+            )
+            runtime_output = (
+                runtime_val if (hit and isinstance(runtime_val, str)) else None
+            )
+
+            try:
+                protocol_meta = node_cls.get_probe_metadata(
+                    inputs=inputs, runtime_output=runtime_output
+                )
+                if isinstance(protocol_meta, dict):
+                    for raw_k, val in protocol_meta.items():
+                        mapped_k = self.scope_manager.transform_key_by_scope(
+                            current_scope, raw_k, class_type
+                        )
+                        target_k = mapped_k if self._is_target_key(mapped_k) else raw_k
+                        if self._is_target_key(target_k):
+                            if isinstance(val, list):
+                                collected[target_k].extend(val)
+                            elif val not in collected[target_k]:
+                                collected[target_k].append(val)
+            except Exception as err:
+                logger.warning(
+                    "Error executing get_probe_metadata for [%s]: %s",
+                    class_type,
+                    str(err),
+                )
+            return
+
+        # 2. 原生单 LoRA 加载节点处理
         if "loraloader" in class_type_lower:
             lora_name = inputs.get("lora_name")
             if isinstance(lora_name, str) and lora_name.strip():
@@ -175,10 +216,10 @@ class DataflowASTTracer:
                     {"lora_name": lora_name.strip(), "strength": strength}
                 )
 
+        # 3. 递归遍历输入插槽
         for input_key, input_val in inputs.items():
             clean_input_key = input_key.strip().lower()
 
-            # 1. 作用域判定
             next_scope = current_scope
             branch_is_model = is_model_branch
 
@@ -197,7 +238,7 @@ class DataflowASTTracer:
             elif clean_input_key in {"model", "unet"}:
                 branch_is_model = True
 
-            # 2. 严格判定是否为合法连线指针 [upstream_node_id, slot_index]
+            # 严格判定连线指针 [upstream_node_id, slot_index]
             is_valid_link = False
             upstream_id = ""
             slot_idx = -1
@@ -262,7 +303,7 @@ class DataflowASTTracer:
                     depth=depth + 1,
                 )
 
-            # 3. 如果是普通字面量 (int, float, str, bool)
+            # 普通字面量处理
             elif isinstance(input_val, (int, float, str, bool)):
                 if (
                     class_type_lower in self.PRIMITIVE_CLASS_TYPES
@@ -296,7 +337,7 @@ class DataflowASTTracer:
                 elif self._is_target_key(actual_key):
                     collected[actual_key].append(input_val)
 
-            # 4. 如果是 LoRA 列表或字典载荷 (loras, lora_stack, lora)
+            # LoRA 列表或字典载荷处理
             elif clean_input_key in {"loras", "lora_stack", "lora"}:
                 parsed_loras = self._clean_lora_payload(input_val)
                 if parsed_loras and (
